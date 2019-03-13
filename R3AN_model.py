@@ -145,8 +145,6 @@ def r3_cat_model(target_dim=512):
     x = layers.Reshape(target_shape=(1, 1, 512))(feature_inputs)
     y = reconstruction_network(x, deconv_setting)
 
-    # concate
-
 
 def r3_model(target_dim=512):
     deconv_setting = [
