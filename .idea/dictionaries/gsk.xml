@@ -2,6 +2,7 @@
   <dictionary name="gsk">
     <words>
       <w>conv</w>
+      <w>dataset</w>
       <w>deconv</w>
       <w>joblib</w>
       <w>pointwise</w>

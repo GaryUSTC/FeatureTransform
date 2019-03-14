@@ -26,6 +26,7 @@ def deconv_bn(inputs, filters, kernel, stride=1, padding='valid'):
 def reconstruction_network(deconv_setting, input_shape=(512,)):
     inputs = layers.Input(shape=input_shape)
     x = inputs
+    x = layers.Reshape(target_shape=(1, 1, 512))(x)
     for f, k, s, p in deconv_setting:
         # filter, kernel, stride, padding
         p = 'same' if p else 'valid'
@@ -109,12 +110,13 @@ def representation_network(invert_res_setting, target_dim=512, input_shape=(64, 
     for t, c, n, s in invert_res_setting:
         for i in range(n):
             if i == 0:
-                x = _inverted_res_block(inputs=x, expansion=t, stride=s, filters=c)
+                x = _inverted_res_block(inputs=x, expansion=tz, stride=s, filters=c)
             else:
                 x = _inverted_res_block(inputs=x, expansion=t, stride=1, filters=c)
     x = conv_bn(x, kernel=1, filters=1280)
     x = layers.AveragePooling2D(8)(x)
     x = layers.Dense(units=target_dim, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(x)
+    x = layers.Reshape(target_shape=(512,))(x)
 
     model = tf.keras.Model(inputs, x)
     return model
@@ -138,12 +140,73 @@ def r3_cat_model(target_dim=512):
         [t, 160, 3, 2],
         [t, 320, 1, 1],
     ]
+
     feature_inputs = layers.Input(shape=(512,))
     img_inputs = layers.Input(shape=(64, 64, 3,))
 
     # reconstruction
-    x = layers.Reshape(target_shape=(1, 1, 512))(feature_inputs)
-    y = reconstruction_network(x, deconv_setting)
+    reconstruction_model = reconstruction_network(deconv_setting)
+    img_restored = reconstruction_model(feature_inputs)
+
+    # concatenate
+    z = layers.concatenate([img_inputs, img_restored])
+
+    # representation
+    representation_model = representation_network(inverted_res_setting, input_shape=(64, 64, 6), target_dim=target_dim)
+    outputs = representation_model(z)
+
+    model = tf.keras.Model(inputs=[feature_inputs, img_inputs], outputs=outputs)
+    model.compile(optimizer=tf.keras.optimizers.Adam(),
+                  loss="mse",
+                  metrics=[tf.keras.metrics.mse, tf.keras.metrics.kld])
+    return model
+
+
+def dataset_api():
+    def _parse_function(src_fea, img_path, tar_fea):
+        image_string = tf.read_file(img_path)
+        image_decoded = tf.image.decode_jpeg(image_string, channels=3)
+        image_decoded = tf.image.convert_image_dtype(image_decoded, tf.float32)
+        image_resized = tf.image.resize_images(image_decoded, [64, 64])
+        return src_fea, image_resized, tar_fea
+
+    train_embed_v1 = np.load('/data/disk4/gsk/VGGFace2/transformation_embedding_v1.npy')
+    print('source feature data loaded')
+    train_embed_v2 = np.load('/data/disk4/gsk/VGGFace2/transformation_embedding_v2.npy')
+    print('target feature data loaded')
+    train_set = np.load('./transformation_train_set.npz')
+    train_label_set = train_set['label']
+
+    dataset = tf.data.Dataset.from_tensor_slices((train_embed_v1, train_label_set, train_embed_v2))
+    dataset = dataset.shuffle(buffer_size=20000)
+    dataset = dataset.repeat()
+    dataset = dataset.map(_parse_function)
+    dataset = dataset.batch(batch_size=32)
+    dataset = dataset.prefetch(1)
+
+    return dataset
+
+
+def train(transform_model_path, tensorboard_path):
+    model = r3_cat_model()
+    model.summary()
+
+    # model_path = transform_model_path + "r2an-model-{epoch:02d}-{val_acc:.2f}.hdf5"
+    callbacks = [
+        # Interrupt training if `val_loss` stops improving for over 2 epochs
+        tf.keras.callbacks.EarlyStopping(patience=2),
+        # tf.keras.callbacks.ModelCheckpoint(model_path, monitor='loss', verbose=1, save_best_only=False, mode='min'),
+        tf.keras.callbacks.TensorBoard(log_dir=tensorboard_path)
+    ]
+
+    dataset = dataset_api()
+
+    model.fit(dataset,
+              steps_per_epoch=98000,
+              epochs=10,
+              callbacks=callbacks,
+              )
+    model.save(transform_model_path)
 
 
 def r3_model(target_dim=512):
@@ -169,7 +232,6 @@ def r3_model(target_dim=512):
     inputs = layers.Input(shape=(512,))
     x = layers.Reshape(target_shape=(1, 1, 512))(inputs)
     y = reconstruction_network(deconv_setting)(x)
-    z = representation_network(inverted_res_setting, target_dim=target_dim)(y)
     z = representation_network(inverted_res_setting, target_dim=target_dim)(y)
     outputs = layers.Reshape(target_shape=(512,))(z)
     model = tf.keras.Model(inputs, outputs)
@@ -202,7 +264,7 @@ def transform_model_training(transform_model_path, tensorboard_path):
 
 
 def get_embedding(transform_model_path, train_emb_path, test_emb_path):
-    model = r3_model()
+    model = r3_cat_model()
     model.load_weights(transform_model_path)
     model.summary()
 
@@ -273,7 +335,7 @@ def main(args):
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
-    session = tf.Session(config=config)
+    tf.Session(config=config)
 
     version_type = args.version_name
     transform_model_path = './transform_weights_' + version_type + '.h5'
@@ -282,7 +344,7 @@ def main(args):
     svc_model_path = './svc_' + version_type + '.joblib'
     tensorboard_path = './logs/' + version_type + '/'
 
-    transform_model_training(transform_model_path, tensorboard_path)
+    train(transform_model_path, tensorboard_path)
     print("model trained")
     get_embedding(transform_model_path, train_emb_path, test_emb_path)
     print("embedding calculated")

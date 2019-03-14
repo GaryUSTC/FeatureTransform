@@ -39,7 +39,6 @@ def get_embedding():
         # test_path_set = test_set['path']
         # test_label_set = test_set['label']
         train_set = np.load('./transformation_train_set.npz')
-        train_path_set = train_set['path']
         train_label_set = train_set['label']
 
         num_img = len(train_label_set)
